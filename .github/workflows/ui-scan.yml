@@ -1,0 +1,67 @@
+name: UIChecker Layer-2 scan
+
+on:
+  # Joomla fires this via the GitHub REST API (POST /repos/:owner/:repo/dispatches)
+  # passing batch_id, callback_url, urls[], viewports[] in client_payload.
+  repository_dispatch:
+    types: [uichecker-scan]
+
+  # Manual / local-debug entry point. Paste a JSON payload (the same shape as
+  # client_payload) into the `payload` input.
+  workflow_dispatch:
+    inputs:
+      payload:
+        description: 'JSON payload (same shape as repository_dispatch.client_payload)'
+        required: true
+
+permissions:
+  contents: read
+  actions: write   # needed for artifact upload
+
+concurrency:
+  # One in-flight Layer-2 batch at a time per branch — newer dispatches queue.
+  group: uichecker-scan-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install JS deps
+        run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Install Playwright (Chromium)
+        run: npx playwright install --with-deps chromium
+
+      - name: Run scan
+        env:
+          UICHECKER_HMAC_KEY: ${{ secrets.UICHECKER_HMAC_KEY }}
+          # For workflow_dispatch we pass the payload through an env var so the script can read it.
+          UICHECKER_PAYLOAD:  ${{ github.event_name == 'workflow_dispatch' && inputs.payload || '' }}
+        run: npm run scan
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uichecker-screenshots-${{ github.run_id }}
+          path: screenshots/
+          retention-days: 90
+          if-no-files-found: warn
