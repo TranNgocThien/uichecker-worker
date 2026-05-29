@@ -52,14 +52,18 @@ jobs:
 
       - name: Run scan
         env:
-          UICHECKER_HMAC_KEY: ${{ secrets.UICHECKER_HMAC_KEY }}
+          UICHECKER_HMAC_KEY: ${{ secrets.UICHECKER_HMAC_KEY || 'test-key' }}
         run: |
-          # For workflow_dispatch without input, use sample payload for testing
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "${{ inputs.payload }}" ]; then
-            export UICHECKER_PAYLOAD="$(cat sample-payload.json)"
-          else
-            export UICHECKER_PAYLOAD="${{ inputs.payload || '' }}"
+          # For workflow_dispatch, use input payload or sample for testing
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.payload }}" ]; then
+              export UICHECKER_PAYLOAD='${{ inputs.payload }}'
+            else
+              export UICHECKER_PAYLOAD="$(cat sample-payload.json)"
+            fi
           fi
+          echo "Event: ${{ github.event_name }}"
+          echo "Payload length: ${#UICHECKER_PAYLOAD}"
           npm run scan
 
       - name: Upload screenshots
