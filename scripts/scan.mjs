@@ -182,7 +182,8 @@ async function scanOne(u, vp) {
 	let screenshotBytes   = 0;
 	if (!navError) {
 		try {
-			const buf = await page.screenshot({ fullPage: false, type: 'png' });
+			// fullPage: true captures the entire scrollable page, not just the viewport.
+			const buf = await page.screenshot({ fullPage: true, type: 'png' });
 			screenshotPath  = `${u.id}-${vp.name}.png`;
 			writeFileSync(join(SCREENSHOT_DIR, screenshotPath), buf);
 			screenshotHash  = createHash('sha256').update(buf).digest('hex').slice(0, 16);
@@ -192,9 +193,26 @@ async function scanOne(u, vp) {
 		}
 	}
 
+	// Enumerate all <a href> on the page and probe their reachability.
+	// Skip mailto:, tel:, javascript:, anchor-only fragments, and obvious non-HTTP links.
+	let brokenLinks = [];
+	let linksChecked = 0;
+	if (!navError) {
+		try {
+			const hrefs = await page.$$eval('a[href]', (anchors) =>
+				anchors.map(a => a.href).filter(h => /^https?:/i.test(h))
+			);
+			const unique = Array.from(new Set(hrefs));
+			linksChecked = unique.length;
+			brokenLinks = await checkLinks(unique, u.url);
+		} catch (e) {
+			console.warn(`Link extraction failed for ${u.url} ${vp.name}: ${e.message}`);
+		}
+	}
+
 	await ctx.close();
 
-	const overall = classify({ navError, status, consoleErrors, pageErrors, h1Count });
+	const overall = classify({ navError, status, consoleErrors, pageErrors, h1Count, brokenLinks });
 
 	const out = {
 		url_id:           u.id,
@@ -204,7 +222,14 @@ async function scanOne(u, vp) {
 		final_url:        finalUrl,
 		navigation_ms:    navMs,
 		title,
-		dom_signals:      { has_title: !!title, has_h1: h1Count > 0, h1_count: h1Count },
+		dom_signals:      {
+			has_title:    !!title,
+			has_h1:       h1Count > 0,
+			h1_count:     h1Count,
+			links_total:  linksChecked,
+			links_broken: brokenLinks.length,
+		},
+		broken_links:     brokenLinks,
 		console_errors:   consoleErrors,
 		page_errors:      pageErrors,
 		screenshot_hash:  screenshotHash,
@@ -214,14 +239,56 @@ async function scanOne(u, vp) {
 		overall,
 	};
 
-	console.log(`  [${overall}] ${vp.name} ${u.url} — ${navMs}ms, ${consoleErrors.length} console errors`);
+	console.log(`  [${overall}] ${vp.name} ${u.url} — ${navMs}ms, ${consoleErrors.length} console errs, ${brokenLinks.length}/${linksChecked} broken links`);
 	return out;
 }
 
-function classify({ navError, status, consoleErrors, pageErrors, h1Count }) {
+/**
+ * Probe each href with a HEAD (fall back to GET if HEAD not allowed).
+ * Returns list of broken entries: [{url, status, error}]. Concurrency capped to keep
+ * the worker gentle on the target host.
+ */
+async function checkLinks(urls, sourceUrl) {
+	const broken = [];
+	const CONCURRENCY = 8;
+	let i = 0;
+
+	async function worker() {
+		while (i < urls.length) {
+			const my = i++;
+			const target = urls[my];
+			try {
+				let resp = await fetch(target, {
+					method: 'HEAD',
+					redirect: 'follow',
+					signal: AbortSignal.timeout(10000),
+				});
+				// Some servers reject HEAD (405); retry with GET.
+				if (resp.status === 405 || resp.status === 501) {
+					resp = await fetch(target, {
+						method: 'GET',
+						redirect: 'follow',
+						signal: AbortSignal.timeout(10000),
+					});
+				}
+				if (!resp.ok) {
+					broken.push({ url: target, status: resp.status, error: null });
+				}
+			} catch (e) {
+				broken.push({ url: target, status: 0, error: e.message.slice(0, 200) });
+			}
+		}
+	}
+
+	await Promise.all(Array.from({ length: Math.min(CONCURRENCY, urls.length) }, () => worker()));
+	return broken;
+}
+
+function classify({ navError, status, consoleErrors, pageErrors, h1Count, brokenLinks = [] }) {
 	if (navError)                  return 'fail';
 	if (!status || status >= 400)  return 'fail';
 	if (pageErrors.length > 0)     return 'fail'; // uncaught JS exception
+	if (brokenLinks.length > 0)    return 'warn'; // dead in-page links
 	if (consoleErrors.length > 0)  return 'warn';
 	if (h1Count === 0)             return 'warn'; // suspicious empty page
 	return 'ok';
