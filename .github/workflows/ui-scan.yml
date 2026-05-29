@@ -53,9 +53,14 @@ jobs:
       - name: Run scan
         env:
           UICHECKER_HMAC_KEY: ${{ secrets.UICHECKER_HMAC_KEY }}
-          # For workflow_dispatch we pass the payload through an env var so the script can read it.
-          UICHECKER_PAYLOAD:  ${{ github.event_name == 'workflow_dispatch' && inputs.payload || '' }}
-        run: npm run scan
+        run: |
+          # For workflow_dispatch without input, use sample payload for testing
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -z "${{ inputs.payload }}" ]; then
+            export UICHECKER_PAYLOAD="$(cat sample-payload.json)"
+          else
+            export UICHECKER_PAYLOAD="${{ inputs.payload || '' }}"
+          fi
+          npm run scan
 
       - name: Upload screenshots
         if: always()
